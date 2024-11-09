@@ -77,8 +77,14 @@ def ipmiConnect(auth, device):
 
 def processDevice(config, device, ipmi, mqtt, registered):
     power = "ON" if ipmi.get_chassis_status().power_on else "OFF"
-    sensors = ipmi.get_power_reading(1)
-    watts = sensors.current_power
+
+    watts = None
+    try:
+        sensors = ipmi.get_power_reading(1)
+        watts = sensors.current_power
+    except pyipmi.errors.CompletionCodeError as e:
+        if config.output >= 2:
+            print(f"Failed to get power reading (no PMBUS?)")
 
     if not registered:
         fru = ipmi.get_fru_inventory()
@@ -90,15 +96,19 @@ def processDevice(config, device, ipmi, mqtt, registered):
             "model": str(product.part_number),
             "name": device.name,
         }
-        hassRegister(mdevice, device, mqtt)
+        hassRegister(mdevice, device, mqtt, watts is not None)
+
     ipmi.session.close()
         
     if config.output >= 2:
-        print(f"IPMI: {device.host} is powered {power} ({watts}W)")
-    mqtt.publish(f"ipmi2mqtt/{device.name}/switch/state", power)
-    mqtt.publish(f"ipmi2mqtt/{device.name}/watts/state", watts)
+        print(f"IPMI: {device.host} is powered {power}"
+                + (f" {watts}W)" if watts is not None else ''))
 
-def hassRegister(mdevice, device, mqtt):
+    mqtt.publish(f"ipmi2mqtt/{device.name}/switch/state", power)
+    if watts is not None:
+        mqtt.publish(f"ipmi2mqtt/{device.name}/watts/state", watts)
+
+def hassRegister(mdevice, device, mqtt, watts_supported):
     payload = {
         "~": f"ipmi2mqtt/{device.name}/switch",
         "name": f"{device.name}_switch",
@@ -108,20 +118,23 @@ def hassRegister(mdevice, device, mqtt):
         "state_topic": "~/state",
         "device": mdevice,
     }
-    topic = f"homeassistant/switch/{device.name}/switch/config"
+    topic = f"homeassistant/switch/{device.name}/config"
     threadLock.acquire()
     #print(f"Register: {topic}")
     mqtt.publish(topic, json.dumps(payload))
-    payload = {
-        "~": f"ipmi2mqtt/{device.name}/watts",
-        "name": f"{device.name}_watts",
-        "unique_id": f"{device.name}_watts",
-        "platform": "mqtt",
-        "state_topic": "~/state",
-        "device": mdevice,
-    }
-    topic = f"homeassistant/sensor/{device.name}/watts/config"
-    mqtt.publish(topic, json.dumps(payload))
+
+    if watts_supported:
+        payload = {
+            "~": f"ipmi2mqtt/{device.name}/watts",
+            "name": f"{device.name}_watts",
+            "unique_id": f"{device.name}_watts",
+            "platform": "mqtt",
+            "state_topic": "~/state",
+            "device": mdevice,
+        }
+        topic = f"homeassistant/sensor/{device.name}/watts/config"
+        mqtt.publish(topic, json.dumps(payload))
+
     threadLock.release()
 
 
@@ -153,7 +166,10 @@ class mqttSetHandler:
 
 
 def mqttConnect(config):
-    mqtt = pmqtt.Client("ipmi2mqtt") #create new instance
+    mqtt = pmqtt.Client(pmqtt.CallbackAPIVersion.VERSION1, "ipmi2mqtt") #create new instance
+    if hasattr(config.mqtt, 'username') and hasattr(config.mqtt, 'password'):
+        mqtt.username_pw_set(config.mqtt.username, config.mqtt.password)
+
     mqtt.connect(config.mqtt.host, config.mqtt.port)
     #signal.signal(signal.SIGTERM, term)
     # Possible todo: enable ping function to make sure a single instance is running
