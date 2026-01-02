@@ -10,5 +10,4 @@ COPY ipmi2mqtt.py ipmi2mqtt.py
 #RUN apk add --no-cache curl jq wget tcpdump busybox avahi open-lldp openrc bash
 #ENV INITSYSTEM on
 
-CMD ["python3", "ipmi2mqtt.py"]
-#ENTRYPOINT ["/bin/sh"]
+ENTRYPOINT ["python3", "-u", "ipmi2mqtt.py"]

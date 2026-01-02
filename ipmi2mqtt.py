@@ -52,8 +52,13 @@ class deviceThread(threading.Thread):
 
 
 def ipmiConnect(auth, device):
-    username = auth.username
-    password = auth.password
+    username = ''
+    password = ''
+
+    if hasattr(auth, 'username'):
+        username = auth.username
+    if hasattr(auth, 'password'):
+        password = auth.password
 
     if hasattr(device, "username"):
         username = device.username
@@ -89,11 +94,22 @@ def processDevice(config, device, ipmi, mqtt, registered):
     if not registered:
         fru = ipmi.get_fru_inventory()
         product = fru.product_info_area
+
+        if not (manufacturer := str(product.manufacturer)):
+            manufacturer = str(fru.board_info_area.manufacturer)
+
+        if not (part_number := str(product.part_number)):
+            part_number = str(fru.board_info_area.part_number)
+
+        serial_number = str(product.serial_number)
+        if not serial_number or serial_number.isspace():
+            serial_number = str(fru.board_info_area.serial_number)
+
         mdevice = {
             #"configuration_url": f"https://{device.host}",
-            "identifiers": str(product.serial_number),
-            "manufacturer": str(product.manufacturer),
-            "model": str(product.part_number),
+            "identifiers": str(serial_number),
+            "manufacturer": str(manufacturer),
+            "model": str(part_number),
             "name": device.name,
         }
         hassRegister(mdevice, device, mqtt, watts is not None)
@@ -113,14 +129,58 @@ def hassRegister(mdevice, device, mqtt, watts_supported):
         "~": f"ipmi2mqtt/{device.name}/switch",
         "name": f"{device.name}_switch",
         "unique_id": f"{device.name}_switch",
+        "manufacturer": f"{mdevice['manufacturer']}",
+        "identifiers": f"{mdevice['identifiers']}",
+        "model": f"{mdevice['model']}",
         "platform": "mqtt",
         "command_topic": "~/set",
         "state_topic": "~/state",
         "device": mdevice,
     }
-    topic = f"homeassistant/switch/{device.name}/config"
+    topic = f"homeassistant/switch/{device.name}/switch/config"
     threadLock.acquire()
-    #print(f"Register: {topic}")
+    mqtt.publish(topic, json.dumps(payload))
+
+    payload = {
+        "~": f"ipmi2mqtt/{device.name}/soft_shutdown",
+        "name": f"{device.name}_soft_shutdown",
+        "unique_id": f"{device.name}_soft_shutdown",
+        "manufacturer": f"{mdevice['manufacturer']}",
+        "identifiers": f"{mdevice['identifiers']}",
+        "model": f"{mdevice['model']}",
+        "platform": "mqtt",
+        "command_topic": "~/press",
+        "device": mdevice,
+    }
+    topic = f"homeassistant/button/{device.name}/soft_shutdown/config"
+    mqtt.publish(topic, json.dumps(payload))
+
+    payload = {
+        "~": f"ipmi2mqtt/{device.name}/power_cycle",
+        "name": f"{device.name}_power_cycle",
+        "unique_id": f"{device.name}_power_cycle",
+        "manufacturer": f"{mdevice['manufacturer']}",
+        "identifiers": f"{mdevice['identifiers']}",
+        "model": f"{mdevice['model']}",
+        "platform": "mqtt",
+        "command_topic": "~/press",
+        "device": mdevice,
+    }
+    topic = f"homeassistant/button/{device.name}/power_cycle/config"
+    mqtt.publish(topic, json.dumps(payload))
+
+    payload = {
+        "~": f"ipmi2mqtt/{device.name}/hard_reset",
+        "name": f"{device.name}_hard_reset",
+        "unique_id": f"{device.name}_hard_reset",
+        "manufacturer": f"{mdevice['manufacturer']}",
+        "identifiers": f"{mdevice['identifiers']}",
+        "model": f"{mdevice['model']}",
+        "platform": "mqtt",
+        "command_topic": "~/press",
+        "device": mdevice,
+    }
+    topic = f"homeassistant/button/{device.name}/hard_reset/config"
     mqtt.publish(topic, json.dumps(payload))
 
     if watts_supported:
@@ -128,6 +188,8 @@ def hassRegister(mdevice, device, mqtt, watts_supported):
             "~": f"ipmi2mqtt/{device.name}/watts",
             "name": f"{device.name}_watts",
             "unique_id": f"{device.name}_watts",
+            "manufacturer": f"{mdevice['manufacturer']}",
+            "model": f"{mdevice['model']}",
             "platform": "mqtt",
             "state_topic": "~/state",
             "device": mdevice,
@@ -155,13 +217,58 @@ class mqttSetHandler:
             if value == "OFF":
                 if self.config.output:
                     print(f"Shutting Down {self.device.name}")
-                ipmi.chassis_control_soft_shutdown()
+                ipmi.chassis_control_power_down()
             elif value == "ON":
                 ipmi.chassis_control_power_up()
                 if self.config.output:
                     print(f"Powering Up {self.device.name}")
                 power = "ON" if ipmi.get_chassis_status().power_on else "OFF"
                 client.publish(f"{stateTopic}", power)
+            ipmi.session.close()
+
+class mqttSoftShutdownHandler:
+    def __init__(self, config, device):
+        self.config = config
+        self.device = device
+
+    def message(self, client, userdata, message): 
+        print(f"Soft Shutdown Handler")
+        value = message.payload.decode("utf-8") 
+        if value in ["PRESS"]:
+            ipmi = ipmiConnect(self.config.ipmi, self.device)
+            if self.config.output:
+                print(f"Shutting Down {self.device.name}")
+            ipmi.chassis_control_soft_shutdown()
+            ipmi.session.close()
+
+class mqttPowerCycleHandler:
+    def __init__(self, config, device):
+        self.config = config
+        self.device = device
+
+    def message(self, client, userdata, message): 
+        print(f"Soft Shutdown Handler")
+        value = message.payload.decode("utf-8") 
+        if value in ["PRESS"]:
+            ipmi = ipmiConnect(self.config.ipmi, self.device)
+            if self.config.output:
+                print(f"Power cycling {self.device.name}")
+            ipmi.chassis_control_power_cycle()
+            ipmi.session.close()
+
+class mqttHardResetHandler:
+    def __init__(self, config, device):
+        self.config = config
+        self.device = device
+
+    def message(self, client, userdata, message): 
+        print(f"Hard Reset Handler")
+        value = message.payload.decode("utf-8") 
+        if value in ["PRESS"]:
+            ipmi = ipmiConnect(self.config.ipmi, self.device)
+            if self.config.output:
+                print(f"Resetting {self.device.name}")
+            ipmi.chassis_control_hard_reset()
             ipmi.session.close()
 
 
@@ -177,14 +284,39 @@ def mqttConnect(config):
     #mqtt.message_callback_add("ipmi2mqtt/ping", on_ping)
     if config.output:
         print("MQTT Connected")
+
     for device in config.devices:
         setSubscribe = f"ipmi2mqtt/{device.name}/+/set"
         mqtt.subscribe(setSubscribe)
         setHandler = mqttSetHandler(config, device)
         mqtt.message_callback_add(setSubscribe, setHandler.message)
-        #mqtt.message_callback_add(f"ipmi2mqtt/{device.name}/+/state", on_state)
         if config.output:
             print(f"Subscribed to {setSubscribe} for {device.name}")
+
+    for device in config.devices:
+        soft_shutdown_subscribe = f"ipmi2mqtt/{device.name}/soft_shutdown/press"
+        mqtt.subscribe(soft_shutdown_subscribe)
+        soft_shutdown_handler = mqttSoftShutdownHandler(config, device)
+        mqtt.message_callback_add(soft_shutdown_subscribe, soft_shutdown_handler.message)
+        if config.output:
+            print(f"Subscribed to {soft_shutdown_subscribe} for {device.name}")
+
+    for device in config.devices:
+        power_cycle_subscribe = f"ipmi2mqtt/{device.name}/power_cycle/press"
+        mqtt.subscribe(power_cycle_subscribe)
+        power_cycle_handler = mqttPowerCycleHandler(config, device)
+        mqtt.message_callback_add(power_cycle_subscribe, power_cycle_handler.message)
+        if config.output:
+            print(f"Subscribed to {power_cycle_subscribe} for {device.name}")
+
+    for device in config.devices:
+        hard_reset_subscribe = f"ipmi2mqtt/{device.name}/hard_reset/press"
+        mqtt.subscribe(hard_reset_subscribe)
+        hard_reset_handler = mqttHardResetHandler(config, device)
+        mqtt.message_callback_add(hard_reset_subscribe, hard_reset_handler.message)
+        if config.output:
+            print(f"Subscribed to {hard_reset_subscribe} for {device.name}")
+
     #mqtt.on_message=on_msg
 
     return mqtt
